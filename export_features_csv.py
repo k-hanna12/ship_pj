@@ -1,3 +1,5 @@
+## 전처리 완료 data 월별 반환 코드
+
 """Export completed training feature files as Excel-readable UTF-8 BOM CSVs."""
 import argparse
 import csv
