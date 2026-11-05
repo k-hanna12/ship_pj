@@ -39,7 +39,24 @@ python -m venv .venv
 
 ## 출력과 해석
 
-- `train_01.parquet` / `test_01.parquet`: 원본 레코드별 특징. 원본 행 수를 유지한다.
+### 승인한 손상 행 별도 보관
+
+6월 원본의 데이터 레코드 127861·127862는 항적이 잘리고 좌표·라벨이 다른 열에 들어간 문제 구간이다.
+원본 ZIP을 수정하거나 항적을 추측해 복원하지 않는다. 아래 옵션은 지정한 원본 레코드만 특징 계산에서 제외하고,
+모든 파싱된 필드 값을 `train_06.quarantine.jsonl`에 원본 파일명·레코드 번호·분리 사유와 함께 보관한다.
+CSV 형식 자체와 정확한 원본 바이트는 원본 ZIP에 그대로 남는다.
+
+```powershell
+python preprocess.py --zip '원본ZIP경로' --split train --months 6 --quarantine-rows 127861 127862 --output data/features_january
+```
+
+기존 실패 시 생성된 `.partial.parquet`은 먼저 별도 실패 보관 폴더로 옮겨 보존한다.
+완료된 다른 월의 결과는 변경하지 않는다. `source_row`는 분리 후에도 원본 레코드 번호를 유지한다.
+품질 보고서의 `input_rows = rows + quarantined_count`로 전체 입력의 누락 여부를 대조한다.
+다른 비어 있지 않은 추가 컬럼이 발견되면 자동 무시하지 않고 계속 오류로 중단한다.
+CSV 변환은 정상 특징 파일만 대상으로 하며 분리한 원본 행은 JSONL에서 별도로 확인한다.
+
+- `train_01.parquet` / `test_01.parquet`: 원본 레코드별 특징. 승인된 별도 보관 행을 제외하면 원본 행 수를 유지한다.
 - `*.quality.json`: 처리 범위, 완료 여부, 날짜, 라벨 분포, 결측·중복·항적 오류, 선박별 라벨.
 - `summary.json`: 해당 출력 폴더의 보고서 통합, 월간 라벨 불일치, Train/Test 선박 ID 겹침.
 - `source_row`: 헤더를 제외한 원본 CSV 레코드 순번(1부터). 따옴표 안 줄바꿈이 있으면 물리적 줄 번호와 다르다.

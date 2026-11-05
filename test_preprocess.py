@@ -15,6 +15,45 @@ from export_features_csv import export_csv
 
 
 class PreprocessingChecks(unittest.TestCase):
+    def test_explicit_quarantine_across_chunks_preserves_fields_and_source_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive_path = root / "input.zip"
+            text = io.StringIO(newline="")
+            rows = [
+                ["20260605", "001", "14", "LINESTRING (126 35, 126.01 35)", "자망", ""],
+                ["20260605", "002", "14", "MULTILINESTRING ((126 35,", "", ""],
+                ["35.123", " 126 35", " 126 35", " 126 35", "", "자망"],
+                ["20260605", "003", "14", "LINESTRING (126 35, 126.01 35)", "통발", ""],
+            ]
+            csv.writer(text).writerows([["part_dt", "rfid_id", "rfid_time", "geom", "fishing_code", ""]] + rows)
+            with zipfile.ZipFile(archive_path, "w") as z:
+                z.writestr("train/vpass_6월 데이터.csv", text.getvalue())
+            before = archive_path.read_bytes()
+            with zipfile.ZipFile(archive_path) as z:
+                process(z, z.infolist()[0], "train", 6, root, 1, 0, "utf-8-sig", [2, 3])
+            data = pq.read_table(root / "train_06.parquet").to_pandas()
+            self.assertEqual(data.source_row.tolist(), [1, 4])
+            self.assertEqual(data.rfid_id.tolist(), ["001", "003"])
+            excluded = [json.loads(line) for line in (root / "train_06.quarantine.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([r["source_row"] for r in excluded], [2, 3])
+            self.assertEqual(list(excluded[1]["fields"].values()), rows[2])
+            report = json.loads((root / "train_06.quality.json").read_text(encoding="utf-8"))
+            self.assertEqual((report["input_rows"], report["rows"], report["quarantined_count"]), (4, 2, 2))
+            self.assertTrue(report["complete_file"])
+            self.assertEqual(archive_path.read_bytes(), before)
+
+    def test_unapproved_nonempty_extra_column_still_stops(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive_path = root / "input.zip"
+            with zipfile.ZipFile(archive_path, "w") as z:
+                z.writestr("train/vpass_6월 데이터.csv",
+                           'part_dt,rfid_id,rfid_time,geom,fishing_code,\n20260605,001,14,"LINESTRING (126 35,126.01 35)",자망,unexpected\n')
+            with zipfile.ZipFile(archive_path) as z:
+                with self.assertRaisesRegex(ValueError, "Unexpected nonempty"):
+                    process(z, z.infolist()[0], "train", 6, root, 2, 0, "utf-8-sig")
+
     def test_csv_export_preserves_ids_korean_and_empty_values(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "features.parquet"

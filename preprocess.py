@@ -112,17 +112,25 @@ def summarize(output):
         "train_test_overlap_ids": sorted(ids["train"] & ids["test"]),
         "inconsistent_train_labels": {k: sorted(v) for k, v in labels.items() if len(v) > 1},
         "scope": "Only completed feature files in this output directory; partial samples are explicitly marked.",
+        "quarantines": [{"source_file": r["source_file"], "input_rows": r.get("input_rows", r["rows"]),
+                         "output_rows": r["rows"], "quarantined_count": r.get("quarantined_count", 0),
+                         "quarantined_rows": r.get("quarantined_rows", []),
+                         "quarantine_file": r.get("quarantine_file")}
+                        for r in reports if r.get("quarantined_count")],
     }
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def process(archive, info, split, month, output, chunk_size, max_rows, encoding):
+def process(archive, info, split, month, output, chunk_size, max_rows, encoding,
+            quarantine_rows=()):
     stem = f"{split}_{month:02d}"
     target = output / f"{stem}.parquet"
     report_path = output / f"{stem}.quality.json"
     partial = output / f"{stem}.partial.parquet"
     db_path = output / f"{stem}.partial.sqlite"
-    if any(p.exists() for p in [target, report_path, partial, db_path]):
+    quarantine_path = output / f"{stem}.quarantine.jsonl"
+    quarantine_rows = set(quarantine_rows)
+    if any(p.exists() for p in [target, report_path, partial, db_path, quarantine_path]):
         raise FileExistsError(f"Output already exists for {stem}. Use a new --output directory.")
     report = {"source_file": info.filename, "split": split, "source_uncompressed_bytes": info.file_size,
               "source_crc32": info.CRC, "rows": 0, "counts": {}, "geometry_status": {},
@@ -130,6 +138,10 @@ def process(archive, info, split, month, output, chunk_size, max_rows, encoding)
               "date_min": None, "date_max": None, "complete_file": False,
               "coordinate_assumption": "WGS84 longitude/latitude; official CRS still needs confirmation",
               "duplicate_policy": "Flag and preserve all rows; checks are within this CSV, across chunks."}
+    report.update(input_rows=0, quarantined_rows=[], quarantined_count=0,
+                  quarantine_file=quarantine_path.name if quarantine_rows else None)
+    if quarantine_rows:
+        report["duplicate_policy"] = "Quarantine explicitly approved source rows; flag and preserve other rows."
     counts, statuses, classes = Counter(), Counter(), Counter()
     vessel_labels, vessels = defaultdict(set), set()
     observed_end = False
@@ -141,15 +153,31 @@ def process(archive, info, split, month, output, chunk_size, max_rows, encoding)
                 reader = pd.read_csv(raw, encoding=encoding, dtype=str, keep_default_na=False,
                                      chunksize=chunk_size, on_bad_lines="error")
                 for chunk in reader:
-                    remaining = max_rows - report["rows"] if max_rows else len(chunk)
+                    remaining = max_rows - report["input_rows"] if max_rows else len(chunk)
                     if remaining <= 0:
                         break
                     chunk = chunk.iloc[:remaining]
+                    source_rows = pd.Series(range(report["input_rows"] + 1,
+                                                  report["input_rows"] + len(chunk) + 1), index=chunk.index)
+                    report["input_rows"] += len(chunk)
                     required = {"part_dt", "rfid_id", "rfid_time", "geom"}
                     if split == "train":
                         required.add("fishing_code")
                     if not required.issubset(chunk.columns):
                         raise ValueError(f"Missing columns: {required - set(chunk.columns)}")
+                    rejected = source_rows.isin(quarantine_rows)
+                    if rejected.any():
+                        # Preserve all parsed fields, including unnamed extras, without truncation.
+                        mode = "a" if report["quarantined_rows"] else "x"
+                        with quarantine_path.open(mode, encoding="utf-8", newline="\n") as handle:
+                            for idx in chunk.index[rejected]:
+                                record = {"source_file": info.filename, "source_row": int(source_rows.loc[idx]),
+                                          "reason": "user_approved_structurally_broken_record",
+                                          "fields": chunk.loc[idx].to_dict()}
+                                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                                report["quarantined_rows"].append(int(source_rows.loc[idx]))
+                        chunk = chunk.loc[~rejected]
+                    row_numbers = source_rows.loc[chunk.index].tolist()
                     extra = [c for c in chunk.columns if c not in required]
                     if any(chunk[c].str.strip().ne("").any() for c in extra):
                         raise ValueError(f"Unexpected nonempty columns: {extra}")
@@ -190,13 +218,14 @@ def process(archive, info, split, month, output, chunk_size, max_rows, encoding)
                         if label:
                             classes[label] += 1
                         output_rows.append(dict(
-                            source_file=info.filename, source_row=report["rows"] + pos + 1,
+                            source_file=info.filename, source_row=row_numbers[pos],
                             split=split, rfid_id=vessel, part_dt=row["part_dt"], rfid_time=row["rfid_time"],
                             timestamp=stamp, year=float(date.year) if date_valid else np.nan,
                             month=float(date.month) if date_valid else np.nan,
                             hour=float(hour) if valid_hour.iloc[pos] else np.nan,
                             fishing_code=label, **flags, **features))
-                    writer.write_table(pa.Table.from_pandas(pd.DataFrame(output_rows), schema=SCHEMA, preserve_index=False))
+                    if output_rows:
+                        writer.write_table(pa.Table.from_pandas(pd.DataFrame(output_rows), schema=SCHEMA, preserve_index=False))
                     db.commit()
                     report["rows"] += len(chunk)
                     valid_dates = dates.dropna()
@@ -204,13 +233,18 @@ def process(archive, info, split, month, output, chunk_size, max_rows, encoding)
                         lo, hi = valid_dates.min().isoformat(), valid_dates.max().isoformat()
                         report["date_min"] = min(report["date_min"] or lo, lo)
                         report["date_max"] = max(report["date_max"] or hi, hi)
-                    print(f"{stem}: {report['rows']:,} rows (CSV bytes read: {raw.tell() / info.file_size:.1%})", flush=True)
+                    print(f"{stem}: {report['rows']:,} output / {report['input_rows']:,} input rows (CSV bytes read: {raw.tell() / info.file_size:.1%})", flush=True)
                     if shutil.disk_usage(output).free < 512 * 1024**2:
                         raise OSError("Less than 512 MiB free; stopped without deleting source data.")
-                    if max_rows and report["rows"] >= max_rows:
+                    if max_rows and report["input_rows"] >= max_rows:
                         break
                 else:
                     observed_end = True
+        if observed_end and set(report["quarantined_rows"]) != quarantine_rows:
+            raise ValueError("Some requested quarantine source rows were not found")
+        report["quarantined_count"] = len(report["quarantined_rows"])
+        if report["input_rows"] != report["rows"] + report["quarantined_count"]:
+            raise ValueError("Input/output/quarantine row counts do not reconcile")
         report.update(counts=dict(counts), geometry_status=dict(statuses), class_rows=dict(classes),
                       vessel_labels={k: sorted(v) for k, v in vessel_labels.items()},
                       vessel_ids=sorted(vessels), complete_file=observed_end,
@@ -236,6 +270,8 @@ def main():
     parser.add_argument("--chunksize", type=int, default=10000)
     parser.add_argument("--max-rows", type=int, default=0, help="0 means the full file; limit is per CSV")
     parser.add_argument("--encoding", default="utf-8-sig")
+    parser.add_argument("--quarantine-rows", type=int, nargs="+", default=[],
+                        help="Approved original CSV record numbers to preserve separately; one CSV only")
     parser.add_argument("--list", action="store_true", help="List CSV members without extracting")
     args = parser.parse_args()
     if args.chunksize < 1 or args.max_rows < 0:
@@ -244,13 +280,16 @@ def main():
         selected = list(members(archive, args.split, args.months))
         if not selected:
             parser.error("No matching monthly CSVs")
+        if args.quarantine_rows and (len(selected) != 1 or min(args.quarantine_rows) < 1):
+            parser.error("quarantine-rows requires one selected CSV and positive source record numbers")
         if args.list:
             for info, split, month in selected:
                 print(f"{split} month={month}: {info.file_size:,} bytes | {info.filename}")
             return
         args.output.mkdir(parents=True, exist_ok=True)
         for info, split, month in selected:
-            process(archive, info, split, month, args.output, args.chunksize, args.max_rows, args.encoding)
+            process(archive, info, split, month, args.output, args.chunksize, args.max_rows, args.encoding,
+                    args.quarantine_rows)
 
 
 if __name__ == "__main__":
