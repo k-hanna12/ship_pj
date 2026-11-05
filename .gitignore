@@ -1,0 +1,16 @@
+# 가상환경
+ship_pj/
+
+# 데이터 (용량이 크고 대회 데이터라 올리면 안 됨)
+data/
+*.csv
+*.parquet
+*.zip
+
+# 파이썬/노트북 임시 파일
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# VS Code 개인 설정
+.vscode/
