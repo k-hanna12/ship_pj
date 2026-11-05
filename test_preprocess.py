@@ -1,4 +1,5 @@
 import io
+import csv
 import json
 from pathlib import Path
 import tempfile
@@ -10,9 +11,27 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from preprocess import GEOD, geometry_features, process, SCHEMA
+from export_features_csv import export_csv
 
 
 class PreprocessingChecks(unittest.TestCase):
+    def test_csv_export_preserves_ids_korean_and_empty_values(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "features.parquet"
+            target = Path(folder) / "features.csv"
+            pd.DataFrame({"rfid_id": ["001", "002"], "fishing_code": ["자망", None],
+                          "distance_total_m": [1.25, 0.0]}).to_parquet(source, index=False)
+            self.assertEqual(export_csv(source, target), 2)
+            with target.open("rb") as handle:
+                self.assertEqual(handle.read(3), b"\xef\xbb\xbf")
+            with target.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["rfid_id"], "001")
+            self.assertEqual(rows[0]["fishing_code"], "자망")
+            self.assertEqual(rows[1]["fishing_code"], "")
+            self.assertEqual(float(rows[0]["distance_total_m"]), 1.25)
+            self.assertEqual(export_csv(source, target), 2)
+
     def test_disconnected_parts_and_repeats(self):
         result = geometry_features("MULTILINESTRING ((126 35, 126 35, 126.01 35), (129 35, 129.01 35))")
         expected = GEOD.inv(126, 35, 126.01, 35)[2] + GEOD.inv(129, 35, 129.01, 35)[2]

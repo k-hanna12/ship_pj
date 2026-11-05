@@ -85,6 +85,18 @@ ZIP 목록·일부 행 확인은 전체 ZIP 무결성 검사가 아니다. 월�
 
 ## 결과를 표로 확인하기
 
+훈련 1~6월이 모두 완료된 뒤 다음 명령으로 월별 전체 CSV를 생성할 수 있다.
+같은 Python 환경에서 실행하며, 이 컴퓨터에서는 앞서 안내한 데스크톱 Python과 `.python-deps`를 사용한다.
+
+```powershell
+python export_features_csv.py --feature-dir data/features_january --output-dir data
+```
+
+`data/train_01_features.csv`부터 `data/train_06_features.csv`까지 UTF-8 BOM으로 저장한다.
+한 번에 10,000행씩 변환하고 CSV의 열과 전체 행 수를 Parquet과 비교한다.
+이미 존재하는 CSV는 열·행 수를 검사한 후 유지한다. 다른 데이터 버전에는 새 출력 폴더를 사용한다.
+CSV는 시트를 지원하지 않는다. 이 파일들은 전처리 확인용이며 최종 제출 엑셀과 구분한다.
+
 전처리 결과는 모델 입력 특징이다. 제출 예시의 예측 조업형태·확률·사고시각·이상점수는
 분류·이상탐지 모델 단계를 실행한 뒤 생성한다. `fishing_code`는 Train의 실제 정답이며 예측값이 아니다.
 
