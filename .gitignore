@@ -19,3 +19,6 @@ __pycache__/
 .python-deps/
 *.partial.sqlite
 *.partial.parquet
+
+*.xlsx
+output/
