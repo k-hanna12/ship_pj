@@ -1,0 +1,6 @@
+# Minimal subset of the existing repository environment for ZIP preprocessing.
+numpy==2.3.5
+pandas==3.0.1
+shapely==2.2.0
+pyproj==3.8.0
+pyarrow==26.0.1

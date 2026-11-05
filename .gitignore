@@ -14,3 +14,8 @@ __pycache__/
 
 # VS Code 개인 설정
 .vscode/
+
+# Local dependency folders and preprocessing temporary files
+.python-deps/
+*.partial.sqlite
+*.partial.parquet
