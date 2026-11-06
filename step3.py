@@ -32,10 +32,15 @@ FEATURE_DIR = Path(r"C:\ship_pj\pre_output")                       # train_XX, t
 PRED_A = Path(r"C:\ship_pj\output\testA_submission.csv")           # STEP 2 결과
 SAMPLE = Path(r"C:\ship_pj\제출샘플.xlsx")                          # 대회 제출샘플
 ACCIDENT = Path(r"C:\ship_pj\사고현황.xlsx")                         # 해경 사고현황 (accident 모드)
-B_MODE = "accident"   # "accident" / "baseline" / "last" / "first" / "zero" / "blank"
-OUT = Path(rf"C:\ship_pj\output\submission_{B_MODE}.xlsx")         # 최종 제출 파일 (모드별 이름)
-FLAG_RATIO = 0.10     # 사고로 표시할 선박 비율 (리더보드 보면서 조정)
-ALL_VESSELS = True    # True: 샘플 선박 + Test 데이터의 모든 선박을 testA·testB에 기록
+B_MODE = "baseline"   # "accident" / "baseline" / "last" / "first" / "zero" / "blank" >> baseline 픽스
+SCORE_VARIANT = "base"  # baseline 점수 방식: "base" / "hour" / "stop" / "stop_hour" >> base 픽스
+#   base      : 평소 대비 이상도만
+#   hour      : 이상도 × 사고현황의 시간대별 사고 빈도 가중치
+#   stop      : 이상도 + "움직이다 갑자기 멈춤" 점수 (기관손상·부유물감김형 사고)
+#   stop_hour : stop × 시간대 가중치
+OUT = Path(rf"C:\ship_pj\output\submission_{B_MODE}_{SCORE_VARIANT}.xlsx")         # 최종 제출 파일 (모드별 이름)
+FLAG_RATIO = 1.0     # 사고로 표시할 선박 비율 (리더보드 보면서 조정)
+ALL_VESSELS = False    # True: 샘플 선박 + Test 데이터의 모든 선박을 testA·testB에 기록
 TRACK_HOURS = 24      # 사고로 표시한 선박에 기록할 사고 전 추적 시간
 MATCH_KM = 5.0        # accident 모드: 사고 지점과 항적 중심의 허용 거리(km)
 MATCH_H = 3           # accident 모드: 사고 시각과 항적 시각의 허용 차이(시간)
@@ -72,7 +77,16 @@ def load_tracks(ids, feature_dir=FEATURE_DIR):
     return df
 
 
-def hourly_scores(df):
+def hour_weights(path=ACCIDENT):
+    """사고현황의 발생 시각 분포 → 시간대(0~23)별 가중치 (최대 1)."""
+    a = pd.read_excel(path, dtype=str)
+    h = pd.to_datetime(a["발생일시"], errors="coerce").dt.hour.dropna().astype(int)
+    cnt = h.value_counts().reindex(range(24), fill_value=0)
+    cnt = (cnt + cnt.shift(1, fill_value=cnt.iloc[-1]) + cnt.shift(-1, fill_value=cnt.iloc[0])) / 3 + 1  # 앞뒤 1시간 평활
+    return (cnt / cnt.max()).to_dict()
+
+
+def hourly_scores(df, variant="base"):
     """선박·시각별 이상항적 점수 (0~1)."""
     d = df.copy()
     d["ts"] = pd.to_datetime(d["part_dt"].astype(str), format="%Y%m%d", errors="coerce") + \
@@ -93,7 +107,19 @@ def hourly_scores(df):
     mad = (d[SIGNALS] - med).abs().groupby(d["rfid_id"]).transform("median")
     floor = (d[SIGNALS] - d[SIGNALS].median()).abs().median() + 1e-9   # MAD가 0인 선박 대비
     z = ((d[SIGNALS] - med).abs() / (1.4826 * mad.clip(lower=floor, axis=1))).clip(upper=5)
-    d["score"] = (z.mean(axis=1, skipna=True) / 5).fillna(0).round(4)
+    d["score"] = (z.mean(axis=1, skipna=True) / 5).fillna(0)
+
+    if variant in ("stop", "stop_hour"):
+        # 직전 시간에 평소처럼 움직이다가 이번 시간에 거의 멈춤 → 높은 점수
+        prev_dist = d.groupby("rfid_id")["distance_total_m"].shift()
+        moving_med = d["distance_total_m"].where(d["distance_total_m"] >= 100).groupby(d["rfid_id"]).transform("median")
+        stop = ((prev_dist / moving_med.clip(lower=100)).clip(upper=3) / 3).where(
+            (d["distance_total_m"] < 100) & (prev_dist >= 300) & (d["gap_h"] <= 2), 0).fillna(0)
+        d["score"] = 0.5 * d["score"] + 0.5 * stop
+    if variant in ("hour", "stop_hour"):
+        w = hour_weights()
+        d["score"] = d["score"] * d["ts"].dt.hour.map(w)
+    d["score"] = d["score"].round(4)
     d["time_str"] = d["ts"].dt.strftime("%Y%m%d %H")
     return d[["rfid_id", "ts", "time_str", "score", "center_lon", "center_lat"]]
 
@@ -271,7 +297,8 @@ def main():
         ids_b = ids_b + ids_test
         print(f"ALL_VESSELS: testB 대상 {len(ids_b):,}척 (샘플 + Test 전체)")
     tracks = load_tracks(ids_b)
-    scores = hourly_scores(tracks)
+    scores = hourly_scores(tracks, SCORE_VARIANT)
+    print(f"점수 방식: {SCORE_VARIANT}")
     if B_MODE == "accident":
         rows_b, n_flag = build_testB_accident(scores, ids_b, load_accidents())
     elif B_MODE in ("last", "first"):
