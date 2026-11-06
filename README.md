@@ -44,7 +44,7 @@ flowchart LR
 
 | 단계 | 파일 | 역할 |
 |---|---|---|
-| 전처리 | (팀원 담당) | ZIP을 풀지 않고 스트리밍으로 읽어 WKT 파싱, 품질 플래그, 시간대별 항적 특징 계산 → 월별 parquet |
+| 전처리 | | ZIP을 풀지 않고 스트리밍으로 읽어 WKT 파싱, 품질 플래그, 시간대별 항적 특징 계산 → 월별 parquet |
 | STEP 1 | `step1.py` | 원본 geom에서 중심 경위도를 계산해 `source_row`로 결합 (전처리 재실행 없이 약 1분/월) |
 | STEP 2 | `step_v4.py` | 선박 단위 집계 → 실험 구성 비교 → 최고 구성으로 Test A 예측 |
 | STEP 3 | `step3.py` | 제출샘플 양식에 testA·testB를 채워 2시트 xlsx 생성 |
